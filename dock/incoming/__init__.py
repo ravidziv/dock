@@ -2,6 +2,8 @@ import os
 import json
 from itertools import chain
 import tablib
+from django.db.models.loading import get_model
+from dock import config
 
 
 class Store(object):
@@ -19,23 +21,81 @@ class Store(object):
         self.obj = obj
 
     def save(self):
+
+        # see if there is a custom save method available for the current object,
+        # else fall back to the default save method.
         try:
             save_method = getattr(self, '_save_' + self.model.__name__.lower())
+
         except AttributeError as e:
             save_method = self._save_base
+
         return save_method(**self.obj)
 
-    def _save_base(self, **obj):
-        obj = self.model.objects.create(**obj)
+    # THE TEMPLATE FOR HOW A CUSTOM SAVE METHOD SHOULD LOOK
+    # def _save_{model_name_lower_case}(self, **obj):
+    #
+    #     ##########################################################
+    #     HERE is the place for any custom code to clean the item
+    #     before passing it to _save_base_.
+    #     After doing the custom work, ensure you have an object that
+    #     can be passed to _save_base
+    #
+    #     If your work replaces some or all of the _prepare_obj
+    #     functionality, you'll need
+    #     to pass prepare=False
+    #     ##########################################################
+    #
+    #     return self._save_base(prepare=False, **obj)
+
+    def _save_base(self, prepare=True, **obj):
+
+        if prepare:
+            obj = self._prepare_obj(obj)
+
+        # by convention, if we have a value for ID, we expect
+        # to be able to retrieve that object.
+        if 'id' in obj and obj['id']:
+            try:
+                instance = self.model.objects.get(pk=obj['id'])
+                for k, v in obj.iteritems():
+                    instance[k] = v
+
+                obj = instance.save()
+
+            except self.model.DoesNotExist as e:
+                raise e
+
+        else:
+            obj = self.model.objects.create(**obj)
+
         return obj
 
-    # def _save_{model_name_lower_case}(self, **obj):
-        #
-        #     HERE is the place for any custom code to clean the item
-        #     before passing it to _save_base_.
-        #     After doing the custom work, ensure you have an object that can be passed to _save_base
-        #
-        #     return self._save_base(**obj)
+    def _prepare_obj(self, **obj):
+
+        for header in obj.keys():
+            fields = config.DOCK_RELATION_LOOKUP_FIELDS
+
+            if config.DOCK_HEADER_ARGS_SEPARATOR in header:
+                header, field = header.split(config.DOCK_HEADER_ARGS_SEPARATOR)
+                fields.insert(0, field)
+
+            # LOGIC FOR FOREIGN KEY FIELDS DEFINED ON THE MODEL
+            if self.model._meta.get_field(header).get_internal_type() == "ForeignKey":
+                model = self.model._meta.get_field(header).rel.to
+
+                for field in fields:
+                    try:
+                        obj[header] = model.objects.get(**{field: obj[header]})
+                        break
+                    except model.DoesNotExist as e:
+                        raise e
+
+            # LOGIC FOR MANYTOMANY FIELDS DEFINED ON THE MODEL
+
+            # LOGIC FOR REVERSE FOREIGN KEY FIELDS
+
+        return obj
 
 
 class Process(object):
