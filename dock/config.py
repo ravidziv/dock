@@ -1,0 +1,3 @@
+DOCK_RELATION_LOOKUP_FIELDS = ['slug', 'name', 'id', 'pk']
+
+DOCK_HEADER_ARGS_SEPARATOR = ':'
