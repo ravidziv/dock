@@ -38,22 +38,6 @@ class Store(object):
 
         return save_method(**self.obj)
 
-    # THE TEMPLATE FOR HOW A CUSTOM SAVE METHOD SHOULD LOOK
-    # def _save_{model_name_lower_case}(self, **obj):
-    #
-    #     ##########################################################
-    #     HERE is the place for any custom code to clean the item
-    #     before passing it to _save_base_.
-    #     After doing the custom work, ensure you have an object that
-    #     can be passed to _save_base
-    #
-    #     If your work replaces some or all of the _prepare_obj
-    #     functionality, you'll need
-    #     to pass prepare=False
-    #     ##########################################################
-    #
-    #     return self._save_base(prepare=False, **obj)
-
     def _save_base(self, prepare=True, **obj):
 
         if prepare:
@@ -76,6 +60,22 @@ class Store(object):
             obj = self.model.objects.create(**obj)
 
         return obj
+
+    # THE TEMPLATE FOR HOW A CUSTOM SAVE METHOD SHOULD LOOK
+    # def _save_{model_name_lower_case}(self, **obj):
+    #
+    #     ##########################################################
+    #     HERE is the place for any custom code to clean the item
+    #     before passing it to _save_base_.
+    #     After doing the custom work, ensure you have an object that
+    #     can be passed to _save_base
+    #
+    #     If your work replaces some or all of the _prepare_obj
+    #     functionality, you'll need
+    #     to pass prepare=False
+    #     ##########################################################
+    #
+    #     return self._save_base(prepare=False, **obj)
 
     def _prepare_obj(self, **obj):
 
@@ -121,36 +121,53 @@ class Process(object):
 
     Each tuple passed in the list has the following signature:
 
-    (module, model, source)
+    (model, data_source)
 
     Where:
 
     * *module* describes a python module in the project that holds *model*
-    * *source* is the file with data for *model*
-
-    From this tuple, we map the data to a model and it's save method.
+    * *data_source* is the file with data for *model*
 
     """
 
-    def __init__(self, freight, storage_class=Store):
+    def __init__(self, inventory, storage_class=Store, dataset_processing_class=None):
 
-        if not isinstance(freight, (list, tuple)):
-            raise AssertionError("Store requires a list or a tuple, you passed neither.")
+        if not isinstance(inventory, (list, tuple)):
+            raise AssertionError("Store requires inventory as a list or a tuple, you passed neither.")
 
-        self.freight = freight
+        if dataset_processing_class:
+            if not isinstance(dataset_processing_class, type):
+                raise AssertionError("Dataset Processor must be a class")
+
+            if not hasattr(dataset_processing_class, 'processed'):
+                raise AssertionError("Dataset Processor must have a callable attribute named `processed`")
+
+        self.inventory = inventory
         self.storage_class = storage_class
+
+        # `self.dataset_processing_class` is implemented to allow processing of the dataset as a whole,
+        # for example, validations on the whole set, extracting additional datasets
+        # out of the passed dataset, and so on.
+        self.dataset_processing_class = dataset_processing_class
         self.save()
 
     def processed(self):
-        """Extract data from the source files, clean it, and return a list of (model, obj_dict) tuples."""
+        """Extract data from the source files, clean headers and rows, and return a list of (model, dataset) tuples."""
 
         processed = []
 
-        for box in self.freight:
-            model, data = box
-            raw_dataset = self._extract_data(data)
-            data = self._clean_data(raw_dataset)
-            processed.append((model, data))
+        for item in self.inventory:
+            model, data_source = item
+            dataset_raw = self._extract_data(data_source)
+            dataset_clean = self._clean_data(dataset_raw)
+            processed.append((model, dataset_clean))
+
+        if self.dataset_processing_class:
+            # We'll send processed as the first argument of whatever class we are given
+            # We expect that class to implement a processed method that returns an ordered
+            # list of (model, dataset) tuples, just list Process.processed
+            dataset_processor = self.dataset_processing_class(processed)
+            processed = dataset_processor.processed()
 
         return processed
 
@@ -158,15 +175,15 @@ class Process(object):
         """Unpack our processed data and pass each object to storage class for saving."""
 
         for item in self.processed():
-            model, data = item
-            for obj in data:
+            model, dataset = item
+            for obj in dataset:
                 store = self.storage_class(model, obj)
                 obj = store.save()
 
-    def _extract_data(self, source):
+    def _extract_data(self, data_source):
         """Create a Dataset object from the data source."""
 
-        with open(source) as f:
+        with open(data_source) as f:
             stream = f.read()
             raw_dataset = tablib.import_set(stream)
 
@@ -175,10 +192,10 @@ class Process(object):
     def _clean_data(self, raw_dataset):
         """Takes the raw Dataset and cleans it up."""
 
-        dataset = self._normalize_headers(raw_dataset)
-        data = self._normalize_objects(dataset)
+        dataset_clean_headers = self._normalize_headers(raw_dataset)
+        dataset_clean = self._normalize_rows(dataset_clean_headers)
 
-        return data
+        return dataset_clean
 
     def _normalize_headers(self, dataset):
         """Clean up the headers of each Dataset."""
@@ -197,17 +214,17 @@ class Process(object):
 
         return dataset
 
-    def _normalize_objects(self, dataset):
+    def _normalize_rows(self, dataset):
         """Clean up each object in the Dataset."""
 
-        data = dataset.dict
+        dataset = dataset.dict
 
-        for item in data:
+        for item in dataset:
             for k, v in item.iteritems():
                 if not v:
                     del item[k]
 
-        return data
+        return dataset
 
 
 class Unload(object):
@@ -234,9 +251,9 @@ class Unload(object):
         self.ignore_dirs = set(ignore_dirs)
         self.index_file = index_file
         self.supported_extensions = supported_extensions
-        self.root_index = self.data_root + '/' + index_file
+        self.root_index = os.path.abspath(os.path.join(self.data_root, index_file))
 
-    def walk_and_sort(self):
+    def extract_sources(self):
         """Returns a list of data sources, ordered by desired save order."""
 
         ordered_branches = []
@@ -279,8 +296,8 @@ class Unload(object):
         # return a flattened list that is ordered for loading to the data store
         return list(chain.from_iterable(ordered_sources))
 
-    def freight(self):
-        """Takes the ordered list of data sources, and builds a new list of tuples, with (model, data_source).
+    def map_inventory(self):
+        """Takes the extracted data sources, and builds a new list of tuples like (model, data_source).
 
         Getting the Model relies on a naming convention in the dataset:
         * the data_source filename is the destination Model name, in lowercase, and the Model itself should be in title case.
@@ -288,15 +305,14 @@ class Unload(object):
 
         """
 
-        freight = []
+        inventory = []
 
-        for data_source in self.walk_and_sort():
-            this_path, ext = os.path.splitext(data_source)
-            path_elements = this_path.split('/')
-            model_name = path_elements[-1]
-            module_name = path_elements[-2]
+        for data_source in self.extract_sources():
+            full_path, ext = os.path.splitext(data_source)
+            head, model_name = os.path.split(full_path)
+            head, module_name = os.path.split(head)
             # TODO: Remove django's get model with a wrapper that will do the same for whatever backend
             model = get_model(module_name, model_name.title())
-            freight.append((model, data_source))
+            inventory.append((model, data_source))
 
-        return freight
+        return inventory

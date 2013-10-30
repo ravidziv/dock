@@ -61,7 +61,7 @@ def load(from_dump='no', source=CONFIG['db_dump_file']):
 
         data_root = CONFIG['dataset_root'] + '/dataset/data'
         unload = Unload(data_root)
-        Process(unload.freight())
+        Process(unload.map_inventory())
 
 
 @task
