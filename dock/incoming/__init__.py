@@ -3,6 +3,7 @@ import json
 from itertools import chain
 import tablib
 from django.db.models.loading import get_model
+from django.db.models.fields import FieldDoesNotExist
 from dock import config
 
 
@@ -19,6 +20,11 @@ class Store(object):
 
         self.model = model
         self.obj = obj
+        self.direct_relation_types = [
+            "ForeignKey",
+            "ManyToManyField",
+            "OneToOneField"
+        ]
 
     def save(self):
 
@@ -73,27 +79,38 @@ class Store(object):
 
     def _prepare_obj(self, **obj):
 
-        for header in obj.keys():
-            fields = config.DOCK_RELATION_LOOKUP_FIELDS
+        for key in obj.keys():
 
-            if config.DOCK_HEADER_ARGS_SEPARATOR in header:
-                header, field = header.split(config.DOCK_HEADER_ARGS_SEPARATOR)
-                fields.insert(0, field)
+            lookup_fields = config.DOCK_RELATION_LOOKUP_FIELDS
+            related_model = None
 
-            # LOGIC FOR FOREIGN KEY FIELDS DEFINED ON THE MODEL
-            if self.model._meta.get_field(header).get_internal_type() == "ForeignKey":
-                model = self.model._meta.get_field(header).rel.to
+            if config.DOCK_HEADER_ARGS_SEPARATOR in key:
+                header, field = key.split(config.DOCK_HEADER_ARGS_SEPARATOR)
+                lookup_fields.insert(0, field)
 
-                for field in fields:
-                    try:
-                        obj[header] = model.objects.get(**{field: obj[header]})
-                        break
-                    except model.DoesNotExist as e:
-                        raise e
+            try:
+                # If the field is actually defined on the class, we'll get the related_model like this
+                model_field = self.model._meta.get_field(header)
+                if model_field.get_internal_type() in self.direct_relation_types:
+                    related_model = model_field.rel.to
 
-            # LOGIC FOR MANYTOMANY FIELDS DEFINED ON THE MODEL
+            except FieldDoesNotExist as e:
+                # The field was not on the class, it is a reverse relation in the ORM
+                try:
+                    model_field = getattr(self.model, header)
+                    related_model = model_field.related.model
 
-            # LOGIC FOR REVERSE FOREIGN KEY FIELDS
+                except AttributeError as e:
+                    #TODO: we actually are raising here when the try/except it is wrapped in
+                    # also fails, and thus the user cant know which error to debug
+                    raise e
+
+            for field in lookup_fields:
+                try:
+                    obj[header] = related_model.objects.get(**{field: obj[header]})
+                    break
+                except related_model.DoesNotExist as e:
+                    raise e
 
         return obj
 
