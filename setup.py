@@ -9,5 +9,6 @@ setup(name='dock',
       author='Paul Walsh',
       author_email='paulywalsh@gmail.com',
       license='BSD',
-      packages=['dock.core.incoming', 'dock.core.outgoing', 'dock.contrib.django', 'dock.contrib.fabric'],
+      packages=['dock', 'dock.core' 'dock.core.incoming', 'dock.core.outgoing',
+                'dock.contrib', 'dock.contrib.django', 'dock.contrib.fabric'],
       zip_safe=False)
