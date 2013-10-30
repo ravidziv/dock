@@ -83,10 +83,13 @@ class Store(object):
 
             lookup_fields = config.DOCK_RELATION_LOOKUP_FIELDS
             related_model = None
+            header = key
 
             if config.DOCK_HEADER_ARGS_SEPARATOR in key:
-                header, field = key.split(config.DOCK_HEADER_ARGS_SEPARATOR)
-                lookup_fields.insert(0, field)
+                header, header_args = key.split(config.DOCK_HEADER_ARGS_SEPARATOR)
+                # TODO: improve the way we take args add add them for lookups. should be namespaced
+                # TODO: also, try the accessor syntax from django `model__field_name`
+                lookup_fields.insert(0, header_args)
 
             try:
                 # If the field is actually defined on the class, we'll get the related_model like this
@@ -105,11 +108,21 @@ class Store(object):
                     # also fails, and thus the user cant know which error to debug
                     raise e
 
-            for field in lookup_fields:
-                try:
-                    obj[header] = related_model.objects.get(**{field: obj[header]})
-                    break
-                except related_model.DoesNotExist as e:
+            if related_model:
+
+                related_success = False
+
+                for field in lookup_fields:
+                    try:
+                        obj[header] = related_model.objects.get(**{field: obj[header]})
+                        related_success = True
+                        break
+
+                    except related_model.DoesNotExist as e:
+                        pass
+
+                if not related_success:
+                    # raising here so our loop above executes as desired
                     raise e
 
         return obj
