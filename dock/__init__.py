@@ -1,2 +1,1 @@
-import incoming
-import outgoing
+from dock.core import incoming, outgoing

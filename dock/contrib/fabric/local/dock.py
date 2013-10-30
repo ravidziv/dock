@@ -1,8 +1,8 @@
 from fabric.api import task, local, lcd
 from fabulous.utilities import notify
-from fabfile.local import db
-from fabfile.config import CONFIG
-from dock.incoming import Unload, Process
+from dock.contrib.fabric.local import db
+from dock.contrib.fabric.config import CONFIG
+from dock.contrib.fabric.local.dock.incoming import Unload, Process
 
 
 @task

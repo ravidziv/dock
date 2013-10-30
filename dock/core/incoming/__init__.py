@@ -4,7 +4,7 @@ from itertools import chain
 import tablib
 from django.db.models.loading import get_model
 from django.db.models.fields import FieldDoesNotExist
-from dock import config
+from dock.contrib.fabric.local.dock import config
 
 
 class Store(object):
@@ -41,7 +41,7 @@ class Store(object):
     def _save_base(self, prepare=True, **obj):
 
         if prepare:
-            obj = self._prepare_obj(obj)
+            obj = self._prepare_obj(**obj)
 
         # by convention, if we have a value for ID, we expect
         # to be able to retrieve that object.

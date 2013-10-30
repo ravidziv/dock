@@ -9,5 +9,5 @@ setup(name='dock',
       author='Paul Walsh',
       author_email='paulywalsh@gmail.com',
       license='BSD',
-      packages=['dock', 'dock.incoming', 'dock.outgoing', 'fabfile'],
+      packages=['dock.core', 'dock.contrib'],
       zip_safe=False)
