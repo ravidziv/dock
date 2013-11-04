@@ -4,6 +4,7 @@ from itertools import chain
 import tablib
 from django.db.models.loading import get_model
 from django.db.models.fields import FieldDoesNotExist
+from django.core.exceptions import FieldError
 from dock import config
 
 
@@ -20,11 +21,8 @@ class Store(object):
 
         self.model = model
         self.obj = obj
-        self.direct_relation_types = [
-            "ForeignKey",
-            "ManyToManyField",
-            "OneToOneField"
-        ]
+        self.direct_relation_types = config.DOCK_DIRECT_RELATION_TYPES
+        self.lookup_fields = config.DOCK_RELATION_LOOKUP_FIELDS
 
     def save(self):
 
@@ -33,36 +31,52 @@ class Store(object):
         try:
             save_method = getattr(self, '_save_' + self.model.__name__.lower())
 
-        except AttributeError as e:
+        except AttributeError:
             save_method = self._save_base
 
         return save_method(**self.obj)
 
     def _save_base(self, prepare=True, **obj):
 
-        if prepare:
-            obj = self._prepare_obj(**obj)
+        related = None
 
-        # by convention, if we have a value for ID, we expect
-        # to be able to retrieve that object.
+        if prepare:
+            obj, related = self._prepare_obj(**obj)
+
+        # by convention, if we have a value for ID,
+        # we expect to be able to retrieve that object.
         if 'id' in obj and obj['id']:
             try:
                 instance = self.model.objects.get(pk=obj['id'])
+                # TODO: won't work for related
                 for k, v in obj.iteritems():
                     instance[k] = v
 
-                obj = instance.save()
+                instance.save()
 
             except self.model.DoesNotExist as e:
                 raise e
 
         else:
-            obj = self.model.objects.create(**obj)
+            instance = self.model.objects.create(**obj)
 
-        return obj
+        if related:
+            for r in related:
+
+                if r[1] == 'ManyToManyField':
+                    r[0].add(*r[2])
+
+                elif r[1] == 'ReverseForeignKey':
+                    for a in r[2]:
+                        obj_dict = {}
+                        obj_dict[self.model.__name__.lower()] = self.model
+                        obj_dict[r[3]] = a
+                        r[0].objects.create(**obj_dict)
+
+        return instance
 
     # THE TEMPLATE FOR HOW A CUSTOM SAVE METHOD SHOULD LOOK
-    # def _save_{model_name_lower_case}(self, **obj):
+    # def _save_{model_name_lower_case}(self, prepare=True, **obj):
     #
     #     ##########################################################
     #     HERE is the place for any custom code to clean the item
@@ -75,29 +89,55 @@ class Store(object):
     #     to pass prepare=False
     #     ##########################################################
     #
-    #     return self._save_base(prepare=False, **obj)
+    #     return self._save_base(prepare=prepare, **obj)
 
     def _prepare_obj(self, **obj):
 
-        for key in obj.keys():
+        related = []
 
-            lookup_fields = config.DOCK_RELATION_LOOKUP_FIELDS
+        for header in obj.keys():
+
             related_model = None
-            header = key
+            header_args = []
+            related_values = []
 
-            if config.DOCK_HEADER_ARGS_SEPARATOR in key:
-                header, header_args = key.split(config.DOCK_HEADER_ARGS_SEPARATOR)
+            # first, if we have args in the header, split them out
+            if config.DOCK_HEADER_ARGS_SEPARATOR in header:
+                header, header_args = header.split(config.DOCK_HEADER_ARGS_SEPARATOR)
+                header_args = header_args.split(config.DOCK_FIELD_ARGS_SEPARATOR)
                 # TODO: improve the way we take args add add them for lookups. should be namespaced
                 # TODO: also, try the accessor syntax from django `model__field_name`
-                lookup_fields.insert(0, header_args)
 
+            # then, we'll do some introspection on our target model fields,
+            # so we can treat related field types distinctly
             try:
                 # If the field is actually defined on the class, we'll get the related_model like this
                 model_field = self.model._meta.get_field(header)
-                if model_field.get_internal_type() in self.direct_relation_types:
+                internal_type = model_field.get_internal_type()
+
+                if internal_type in self.direct_relation_types:
                     related_model = model_field.rel.to
 
+                    # if the field is an m2m we need to extract the multi-value arguments
+                    if internal_type == 'ManyToManyField':
+                        # TODO: We need to know fit he m2m has a through table
+                        related_values = header.split(config.DOCK_FIELD_ARGS_SEPARATOR)
+                        # then, we get instances for those args
+                        for index, value in enumerate(related_values):
+                            related_values[index] = self._find_instance(related_model, value,
+                                                                        extra_lookups=[header_args[0]])
+
+                        # related is a list of tuples. enough for us to save the related objects later
+                        related.append((model_field, internal_type, related_values))
+
+                        del obj[header]
+
+                else:
+                    # TODO: handle this
+                    pass
+
             except FieldDoesNotExist as e:
+                # TODO: We assume here that the related instance exists. maybe we wanted to create it
                 # The field was not on the class, it is a reverse relation in the ORM
                 try:
                     model_field = getattr(self.model, header)
@@ -108,24 +148,44 @@ class Store(object):
                     # also fails, and thus the user cant know which error to debug
                     raise e
 
-            if related_model:
+                if related_model:
+                    # TODO: support other reverse relations
+                    internal_type = 'ReverseForeignKey'
+                    related_values = header.split(config.DOCK_FIELD_ARGS_SEPARATOR)
+                    # then, we get instances for those args
+                    #for index, value in enumerate(related_args):
+                    #    #hmmm, should be create instance, but only after we have an instance of the main model
+                    #    related_args[index] = self._find_instance(related_model, value, extra_lookups=[header_args])
 
-                related_success = False
+                    # related is a list of tuples. enough for us to save the related objects later
+                    related.append((related_model, internal_type, related_values, header_args[0]))
 
-                for field in lookup_fields:
-                    try:
-                        obj[header] = related_model.objects.get(**{field: obj[header]})
-                        related_success = True
-                        break
+        return obj, related
 
-                    except related_model.DoesNotExist as e:
-                        pass
+    def _find_instance(self, model, value, extra_lookups=None):
+        """Using a try/except loop with a lookup table, try to find a model instance."""
 
-                if not related_success:
-                    # raising here so our loop above executes as desired
-                    raise e
+        lookups = self.lookup_fields
+        success = False
+        instance = None
 
-        return obj
+        if extra_lookups:
+            lookups.extend(extra_lookups)
+
+        for lookup in lookups:
+            try:
+                instance = model.objects.get(**{lookup: value})
+                success = True
+                break
+            except (FieldError, model.DoesNotExist) as e:
+                pass
+
+        if not success:
+            # raising here so our loop above executes as desired
+            # TODO: do it better?
+            raise e
+
+        return instance
 
 
 class Process(object):
